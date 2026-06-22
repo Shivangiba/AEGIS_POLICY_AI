@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+/* Tailwind v4: register palette as @theme tokens (direct hex values) */
+@theme {
+  --color-linen: #fff9f3;
+  --color-latte: #dbc4a5;
+  --color-latte-muted: rgb(219 196 165 / 0.35);
+  --color-deepolive: #44422d;
+  --color-clockwork: #72583e;
+  --color-clockwork-hover: #5f4a34;
+  --color-cedar: #7c7960;
+  --color-mauve: #755151;
+  --color-mauve-muted: rgb(117 81 81 / 0.12);
+  --color-cafenoir: #443223;
+  --color-weathered: #a08670;
+
+  --color-background: #fff9f3;
+  --color-foreground: #44422d;
+
+  --font-sans: var(--font-inter);
+  --font-serif: var(--font-lora);
+  --font-mono: var(--font-geist-mono);
+
+  --shadow-warm-sm: 0 1px 3px rgb(68 50 35 / 0.08);
+  --shadow-warm-md: 0 4px 16px rgb(68 50 35 / 0.1);
+  --shadow-warm-lg: 0 8px 32px rgb(68 50 35 / 0.12);
+}
+
+body {
+  background: var(--color-linen);
+  color: var(--color-deepolive);
+  font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
+}
+
+/* Smooth expand/collapse for sources panel */
+.sources-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 250ms ease-in-out, opacity 250ms ease-in-out;
+  opacity: 0;
+}
+
+.sources-collapse.expanded {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.sources-collapse > div {
+  overflow: hidden;
+}
+
+/* Custom scrollbar for warm palette */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #7c7960;
+  border-radius: 3px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #72583e;
+}
