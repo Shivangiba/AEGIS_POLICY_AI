@@ -31,8 +31,9 @@ All initial setup tasks for the backend and frontend are complete. The basic str
 - [x] Create `generate_answer` service in `services/chat_service.py`.
 - [x] Create `/api/chat` endpoint in `routes/chat.py`.
 
-### Frontend
+### Backend
 - [x] Create `check_sensitive_topic` endpoint in `routes/upload.py`.
+  - `POST /api/check-sensitive-topic` accepts `SensitiveTopicRequest { query }` and returns `SensitiveTopicResponse { is_sensitive, message }`.
 
 - [x] In `chat_service.py`, changed the retriever's `k` parameter from 3 to 5.
 - [x] In `config.py`, increased `CHUNK_OVERLAP` from 150 to 200.
@@ -186,6 +187,63 @@ Full UI/UX redesign applied on top of existing working API logic. No changes to 
 
 ---
 
+## Phase 9: Safety Endpoint & Startup Optimization
+
+### Backend
+- [x] Implemented `POST /api/check-sensitive-topic` endpoint in `routes/upload.py`.
+  - Accepts `SensitiveTopicRequest { query: str }` body.
+  - Calls `check_sensitive_topic()` from `safety_router.py`.
+  - Returns `SensitiveTopicResponse { is_sensitive: bool, message: Optional[str] }`.
+  - Raises `HTTPException(500)` on unexpected errors.
+- [x] Added `asynccontextmanager` lifespan handler to `main.py`.
+  - Pre-loads the HuggingFace embedding model (`VectorStoreManager.get_embedding_function()`) at server startup.
+  - Eliminates cold-start latency on the first upload request.
+  - Prints `[Startup] Pre-loading embedding model…` and `[Startup] Embedding model ready.` to logs.
+
+---
+
+---
+
+## Phase 10: Cross-Origin HMR/WebSocket Warning Fix
+
+Fix for a recurring Next.js dev server cross-origin warning that appeared on every new network session due to DHCP IP reassignment.
+
+**Root cause:** The `allowedDevOrigins` list in `next.config.ts` contained a hardcoded LAN IP (`10.152.183.197`) that became invalid after DHCP reassignment, causing Next.js to block HMR WebSocket connections from the new IP.
+
+### Fix 1 — `frontend/next.config.ts` (allowedDevOrigins)
+- [x] Replaced hardcoded LAN IP with CIDR notation for all three private IPv4 ranges:
+  - `10.0.0.0/8` (Class A), `172.16.0.0/12` (Class B), `192.168.0.0/16` (Class C)
+- [x] CIDR notation is supported in Next.js 15.1+; this project uses **Next.js 16.2.9**.
+- [x] Preserved the existing `rewrites()` proxy block (backend API passthrough) unchanged.
+
+### Fix 2 — `frontend/package.json` (dev script)
+- [x] Changed `"dev": "next dev"` → `"dev": "next dev --hostname 0.0.0.0"`
+- [x] Binds the dev server to all network interfaces, eliminating the binding mismatch between `localhost` and the machine's LAN IP.
+
+### Fix 3 — `frontend/.env.local` (no change needed)
+- [x] `NEXT_PUBLIC_API_URL` was already set to `http://127.0.0.1:8000` ✅
+
+### Fix 4 — `backend/app/main.py` + `.env` + `.env.example` (CORS hardening)
+- [x] Added `_BASE_DEV_ORIGINS` list in `main.py` with three always-allowed local origins:
+  - `http://localhost:3000`, `http://127.0.0.1:3000`, `http://0.0.0.0:3000`
+- [x] `_cors_origins` now merges `_BASE_DEV_ORIGINS` + `settings.BACKEND_CORS_ORIGINS` (deduplicated via `dict.fromkeys`).
+- [x] Removed hardcoded LAN IP `http://10.152.183.197:3000` from `backend/.env` and replaced with `http://0.0.0.0:3000`.
+- [x] Rewrote `backend/.env.example` with clear documentation explaining when to extend `ALLOWED_ORIGINS`.
+
+### Fix 5 — `frontend/src/app/layout.tsx` (React hydration mismatch)
+- [x] Added `suppressHydrationWarning={true}` to the `<body>` element.
+- **Cause:** Adobe Acrobat browser extension injects a `__processed_*__` attribute into `<body>` before React hydrates, causing a server/client HTML mismatch warning in dev mode.
+- **Why this fix:** `suppressHydrationWarning` is the official React/Next.js recommended approach — it silences the warning only on that specific element without disabling hydration checks anywhere else in the component tree. Only affects dev-mode warnings; has zero production impact.
+
+### Files changed in Phase 10
+- `frontend/next.config.ts`
+- `frontend/package.json`
+- `backend/app/main.py`
+- `backend/.env`
+- `backend/.env.example`
+
+---
+
 ## Current Project Status
 
 | Phase | Description | Status |
@@ -198,8 +256,9 @@ Full UI/UX redesign applied on top of existing working API logic. No changes to 
 | Phase 6 | Bug fixes: send button, CORS, Pydantic default, type annotation | ✅ Complete |
 | Phase 7 | High-fidelity UI redesign with warm palette & component split | ✅ Complete |
 | Phase 8 | Meta-conversation queries, Tailwind v4 color fix, sidebar default | ✅ Complete |
+| Phase 9 | `/api/check-sensitive-topic` endpoint, lifespan startup embedding pre-load | ✅ Complete |
+| Phase 10 | Cross-origin HMR fix: CIDR allowedDevOrigins, 0.0.0.0 binding, CORS hardening, suppressHydrationWarning | ✅ Complete |
 
 ### Optional / Future Work
-- [ ] Expose `check_sensitive_topic` as a standalone HTTP endpoint in `routes/upload.py` (service exists; `SensitiveTopicRequest`/`SensitiveTopicResponse` schemas defined).
 - [ ] Persist vector store sessions across server restarts (currently ephemeral by design).
 - [ ] Add authentication for session access.

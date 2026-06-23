@@ -34,7 +34,7 @@ export default function RootLayout({
       lang="en"
       className={`${inter.variable} ${lora.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-linen text-deepolive">
+      <body suppressHydrationWarning={true} className="min-h-full flex flex-col bg-linen text-deepolive">
         {children}
       </body>
     </html>

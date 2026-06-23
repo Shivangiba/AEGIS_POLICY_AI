@@ -66,14 +66,14 @@ hr-rag-chatbot/
 │   ├── requirements.txt             # Python dependencies
 │   ├── auratech_employee_handbook.pdf  # Sample test PDF
 │   └── app/
-│       ├── main.py                  # FastAPI app entry point
+│       ├── main.py                  # FastAPI app entry point (lifespan: pre-loads embedding model at startup)
 │       ├── core/
 │       │   ├── config.py            # Pydantic settings (reads .env)
 │       │   └── prompts.py           # LangChain prompt templates (GROUNDED_QA, REFORMULATE, CONVERSATION_SUMMARY)
 │       ├── models/
 │       │   └── schemas.py           # Pydantic request/response schemas
 │       ├── routes/
-│       │   ├── upload.py            # POST /api/upload endpoint
+│       │   ├── upload.py            # POST /api/upload + POST /api/check-sensitive-topic endpoints
 │       │   └── chat.py              # POST /api/chat endpoint
 │       └── services/
 │           ├── document_processor.py  # PDF loading + chunking
@@ -83,8 +83,8 @@ hr-rag-chatbot/
 │
 └── frontend/
     ├── .env.local                   # NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
-    ├── next.config.ts               # Minimal Next.js config (no overrides)
-    ├── package.json                 # Dependencies: next, react, axios, tailwindcss
+    ├── next.config.ts               # allowedDevOrigins CIDR ranges + /api rewrite proxy
+    ├── package.json                 # Dependencies: next, react, axios, tailwindcss; dev script: --hostname 0.0.0.0
     ├── postcss.config.mjs           # PostCSS for Tailwind
     ├── tsconfig.json                # TypeScript config
     └── src/
@@ -133,10 +133,14 @@ pydantic-settings, python-dotenv
 ---
 
 ### `backend/app/main.py`
-- Creates the FastAPI app instance.
-- Adds `CORSMiddleware` with `allow_origins` from settings, `allow_credentials=True`, `allow_methods=["*"]`, `allow_headers=["*"]`.
+- Creates the FastAPI app instance with an **`asynccontextmanager` lifespan** handler.
+- **Startup event:** Calls `VectorStoreManager.get_embedding_function()` at startup to pre-load the HuggingFace embedding model before any requests are served. Prints `[Startup] Embedding model ready.`
+- Defines `_BASE_DEV_ORIGINS` — a hardcoded list of always-allowed local origins:
+  `http://localhost:3000`, `http://127.0.0.1:3000`, `http://0.0.0.0:3000`
+- Builds `_cors_origins` by merging `_BASE_DEV_ORIGINS` with `settings.BACKEND_CORS_ORIGINS` (from `.env`), deduplicated with `dict.fromkeys()`.
+- Adds `CORSMiddleware` with the merged `_cors_origins`, `allow_credentials=True`, `allow_methods=["*"]`, `allow_headers=["*"]`.
 - Registers two routers under prefix `/api`:
-  - `upload.router` → handles `/api/upload`
+  - `upload.router` → handles `/api/upload` and `/api/check-sensitive-topic`
   - `chat.router` → handles `/api/chat`
 - Exposes a `GET /health` endpoint returning `{"status": "healthy"}`.
 
@@ -180,9 +184,9 @@ Pydantic models for API I/O:
 ---
 
 ### `backend/app/routes/upload.py`
-Handles `POST /api/upload`.
+Hosts two endpoints: `POST /api/upload` and `POST /api/check-sensitive-topic`.
 
-**Flow:**
+**`POST /api/upload` Flow:**
 1. Validates file extension is `.pdf` (returns 400 if not).
 2. Generates a new `session_id = str(uuid.uuid4())`.
 3. Saves the uploaded file to a temp file on disk.
@@ -193,6 +197,12 @@ Handles `POST /api/upload`.
 7. Returns: `{ session_id, filename, chunk_count, status: "indexed" }`.
 
 Error handling: if session creation fails after an unexpected error, the session is cleaned up.
+
+**`POST /api/check-sensitive-topic` Flow:**
+- Accepts `SensitiveTopicRequest` body `{ query: str }`.
+- Calls `check_sensitive_topic(query)` from `safety_router.py`.
+- Returns `SensitiveTopicResponse`: `{ is_sensitive: true, message: "..." }` if a keyword matched, or `{ is_sensitive: false, message: null }` otherwise.
+- Raises `HTTPException(500)` on unexpected errors.
 
 ---
 
@@ -260,7 +270,13 @@ conversation_summary_chain = CONVERSATION_SUMMARY_PROMPT | llm | StrOutputParser
 ```
 
 **`is_meta_conversation_query(query) -> bool`**  
-Detects when a query is about the conversation itself (not the document). Uses word-boundary regex for patterns like "summarize this chat", "what did I ask", "recap our conversation", etc.
+Detects when a query is about the conversation itself (not the document). Uses **four pre-compiled regex patterns** with word boundaries:
+- `_SUMMARY_ACTION_PATTERN` — matches `summarize|summarise|recap`
+- `_CONVERSATION_REF_PATTERN` — matches `chat|conversation|asked|discussed`
+- `_WHAT_DID_ASK_PATTERN` — matches `"what ... I/we ... ask/asked"`
+- `_WHAT_DISCUSSED_PATTERN` — matches `"what have/did ... discussed/talked/asked"`
+
+Returns `True` if `(SUMMARY_ACTION + CONVERSATION_REF)` both match, OR if either `WHAT_DID_ASK` or `WHAT_DISCUSSED` matches alone.
 
 **`format_docs(docs) -> str`**  
 Joins retrieved chunks into one context string. If the first chunk has `document_title` metadata, prepends `"Document: <title>\n\n"` to the context.
@@ -292,16 +308,28 @@ The full RAG pipeline:
 ### `frontend/.env.local`
 ```
 NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+BACKEND_URL=http://127.0.0.1:8000
 ```
-This is the only environment variable. It is read by `api.ts` as the Axios base URL.
+- `NEXT_PUBLIC_API_URL` — read by `api.ts` as the Axios base URL (publicly exposed to the browser).
+- `BACKEND_URL` — read by `next.config.ts` to configure the `/api/*` rewrite proxy (server-side only).
+
+---
+
+### `frontend/next.config.ts`
+- **`allowedDevOrigins`** — uses CIDR notation to permanently allow HMR WebSocket connections from any private-network IP, eliminating the recurring cross-origin warning on DHCP reassignment:
+  - `localhost`, `127.0.0.1`
+  - `10.0.0.0/8` (Class A), `172.16.0.0/12` (Class B), `192.168.0.0/16` (Class C)
+  - CIDR support requires Next.js ≥ 15.1 (this project: **Next.js 16.2.9**) ✅
+- **`rewrites()`** — proxies all `/api/*` requests to the FastAPI backend at `BACKEND_URL` (defaults to `http://127.0.0.1:8000`). This lets the frontend call `/api/upload`, `/api/chat`, etc. without specifying the backend host directly.
 
 ---
 
 ### `frontend/src/app/layout.tsx`
 - Root Next.js layout.
-- Loads **Inter** (body) and **Lora** (serif headings) from Google Fonts.
+- Loads **Inter** (body), **Lora** (serif headings), and **Geist Mono** from Google Fonts.
 - Metadata title: `"HR Policy Assistant"`.
 - Wraps children in `<html>` and `<body>` with `bg-linen text-deepolive`.
+- **`<body suppressHydrationWarning={true}>`** — suppresses React hydration mismatch warnings caused by browser extensions (e.g. Adobe Acrobat) injecting attributes like `__processed_*__` into `<body>` before React hydrates. This is the official React/Next.js fix; it only affects that element and has zero production impact.
 
 ---
 
@@ -495,7 +523,9 @@ All four originally documented bugs have been fixed:
 | Setting | Source | Value |
 |---|---|---|
 | Backend URL | `frontend/.env.local` | `http://127.0.0.1:8000` |
-| Frontend URL | `backend/.env` ALLOWED_ORIGINS | `http://localhost:3000` |
+| Frontend URL | `backend/.env` ALLOWED_ORIGINS | `http://localhost:3000,http://127.0.0.1:3000,http://0.0.0.0:3000` |
+| Dev server binding | `package.json` dev script | `--hostname 0.0.0.0` (all interfaces) |
+| HMR allowed origins | `next.config.ts` allowedDevOrigins | CIDR: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` |
 | LLM | `chat_service.py` | `llama-3.3-70b-versatile` (Groq) |
 | LLM Temperature | `chat_service.py` | `0.0` |
 | Embedding Model | `.env` / `config.py` | `sentence-transformers/all-MiniLM-L6-v2` |
@@ -540,7 +570,6 @@ npm run dev
 | Phase 8 | Meta-conversation queries, Tailwind v4 color fix, sidebar default | ✅ Complete |
 
 ### Optional / Future Work
-- Expose `check_sensitive_topic` as a standalone HTTP endpoint in `routes/upload.py` (service exists; schemas defined).
 - Persist vector store sessions across server restarts (currently ephemeral by design).
 - Add authentication for session access.
 
@@ -549,6 +578,9 @@ npm run dev
 ## 11. What the Next Agent Should Know
 
 - **All originally known bugs are fixed** — send button, CORS, Pydantic default, type annotation, Tailwind colors, sidebar default.
+- **`/api/check-sensitive-topic` endpoint is live** — implemented in `routes/upload.py`; was previously listed as "future work" but is now complete.
+- **Embedding model is pre-loaded at startup** — `main.py` uses an `asynccontextmanager` lifespan to call `VectorStoreManager.get_embedding_function()` before serving requests, eliminating cold-start latency on the first upload.
+- **HMR cross-origin warning is permanently fixed** — `allowedDevOrigins` uses CIDR ranges (no hardcoded IPs); dev server binds `0.0.0.0`; backend CORS always includes `localhost:3000`, `127.0.0.1:3000`, and `0.0.0.0:3000` in code regardless of `.env`.
 - **UI is componentized** — `page.tsx` owns state/handlers; rendering lives in `src/components/`.
 - **Meta-conversation queries** ("summarize this chat", "what did I ask") are handled by `is_meta_conversation_query()` and bypass the RAG pipeline.
 - **Tailwind v4** — colors registered via `@theme { --color-*: #hex }` in `globals.css`; use `deepolive`, `cafenoir`, etc. (no hyphens).
