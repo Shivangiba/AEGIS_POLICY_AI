@@ -12,3 +12,7 @@ pypdf
 sentence-transformers
 pydantic-settings
 python-dotenv
+
+motor
+PyJWT
+cryptography

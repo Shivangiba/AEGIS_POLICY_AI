@@ -1,17 +1,26 @@
 "use client";
 
-import { useState, useRef, FormEvent, ChangeEvent, useEffect } from "react";
+import { useState, useRef, FormEvent, ChangeEvent, useEffect, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import type { User } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
 import {
   uploadDocument,
   sendChatMessage,
+  getConversations,
+  getConversationDetail,
+  getDocuments,
+  getDocumentDetail,
+  deleteDocument,
 } from "../lib/api";
-import type { UploadResponse, Message } from "../lib/types";
+import type { UploadResponse, Message, ConversationResponse, DocumentResponse } from "../lib/types";
 import Sidebar from "../components/Sidebar";
 import MessageBubble from "../components/MessageBubble";
 import ChatInput from "../components/ChatInput";
 import TypingIndicator from "../components/TypingIndicator";
 import UploadScreen from "../components/UploadScreen";
 import { MenuIcon, PanelIcon } from "../components/icons";
+import { LogOut, User as UserIcon } from "lucide-react";
 
 export default function Home() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -23,9 +32,177 @@ export default function Home() {
   const [chatInput, setChatInput] = useState<string>("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  // Documents State
+  const [documents, setDocuments] = useState<DocumentResponse[]>([]);
+  const [isLoadingDocuments, setIsLoadingDocuments] = useState(false);
+
+  // Auth and Conversations State
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [conversations, setConversations] = useState<ConversationResponse[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Show banner if user landed here with ?expired=1 (e.g. manual back navigation)
+  const [showExpiredBanner, setShowExpiredBanner] = useState(
+    searchParams.get("expired") === "1"
+  );
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const userMessageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  // Helper: redirect to login with expired flag so login page can show a message
+  const redirectToLogin = useCallback(() => {
+    router.push("/login?expired=1");
+  }, [router]);
+
+  const fetchConversations = useCallback(async () => {
+    try {
+      const data = await getConversations();
+      setConversations(data.conversations);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to fetch conversations";
+      // Backend returns 401 as "Invalid authentication credentials" or "Token has expired"
+      if (
+        msg.includes("Invalid authentication") ||
+        msg.includes("Token has expired") ||
+        msg.includes("Unauthorized") ||
+        msg.includes("401")
+      ) {
+        redirectToLogin();
+      } else {
+        setError(msg);
+      }
+    }
+  }, [redirectToLogin]);
+
+  const fetchDocuments = useCallback(async () => {
+    try {
+      setIsLoadingDocuments(true);
+      const docs = await getDocuments();
+      setDocuments(docs);
+    } catch (err) {
+      console.error("Failed to fetch documents", err);
+    } finally {
+      setIsLoadingDocuments(false);
+    }
+  }, []);
+
+  // Initial auth check
+  useEffect(() => {
+    let isMounted = true;
+
+    const checkAuth = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!isMounted) return;
+
+        if (!session) {
+          redirectToLogin();
+        } else {
+          setUser(session.user);
+          await fetchConversations();
+          await fetchDocuments();
+        }
+      } catch (err) {
+        console.error("Auth check failed", err);
+        if (isMounted) redirectToLogin();
+      } finally {
+        if (isMounted) setAuthLoading(false);
+      }
+    };
+
+    checkAuth();
+
+    return () => { isMounted = false; };
+  }, [redirectToLogin, fetchConversations, fetchDocuments]);
+
+  // Subscribe to auth state changes
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_OUT") {
+        // Token refresh failed or user signed out elsewhere — force redirect
+        redirectToLogin();
+      } else if (session && (event === "SIGNED_IN" || event === "TOKEN_REFRESHED")) {
+        setUser(session.user);
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, [redirectToLogin]);
+
+  const handleSelectConversation = async (id: string) => {
+    try {
+      setError(null);
+      const detail = await getConversationDetail(id);
+      setActiveConversationId(detail.id);
+
+      // Fetch active document details if available
+      if (detail.document_id) {
+        try {
+          const doc = await getDocumentDetail(detail.document_id);
+          setSessionInfo({
+            document_id: doc.id,
+            filename: doc.filename,
+            chunk_count: 0,
+            status: "ready",
+          });
+        } catch (docErr) {
+          console.error("Failed to fetch document details for conversation", docErr);
+        }
+      } else {
+        setSessionInfo(null);
+      }
+
+      const loadedMessages: Message[] = [];
+      detail.conversation_history.forEach((turn) => {
+        loadedMessages.push({ role: "user", content: turn.question });
+        loadedMessages.push({ role: "assistant", content: turn.answer });
+      });
+      setMessages(loadedMessages);
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (
+        msg.includes("Invalid authentication") ||
+        msg.includes("Token has expired") ||
+        msg.includes("Unauthorized") ||
+        msg.includes("401")
+      ) {
+        redirectToLogin();
+      } else {
+        setError(msg);
+      }
+    }
+  };
+
+  const handleSelectDocument = (doc: DocumentResponse) => {
+    // Simulate an upload response using the selected document's details
+    // so the chat interface knows which document to query
+    setSessionInfo({
+      document_id: doc.id,
+      filename: doc.filename,
+      chunk_count: doc.chunk_count || 0, // not important for chatting
+      status: "ready"
+    });
+    setMessages([]);
+    setActiveConversationId(null);
+    setError(null);
+  };
+
+  const handleDeleteDocument = async (id: string) => {
+    try {
+      await deleteDocument(id);
+      if (sessionInfo?.document_id === id) {
+        handleStartOver();
+      } else {
+        await fetchDocuments();
+      }
+    } catch (err) {
+      console.error("Failed to delete document", err);
+      alert("Failed to delete document.");
+    }
+  };
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -44,8 +221,22 @@ export default function Home() {
       const response = await uploadDocument(file);
       setSessionInfo(response);
       setMessages([]);
+      setActiveConversationId(null);
+      // Refresh documents list
+      await fetchDocuments();
     } catch (err) {
-      setError((err as Error).message);
+      const msg = err instanceof Error ? err.message : "Upload failed";
+      if (
+        msg.includes("Invalid authentication") ||
+        msg.includes("Token has expired") ||
+        msg.includes("Unauthorized") ||
+        msg.includes("401")
+      ) {
+        redirectToLogin();
+      } else {
+        setError(msg);
+        alert(msg);
+      }
     } finally {
       setIsUploading(false);
     }
@@ -53,7 +244,7 @@ export default function Home() {
 
   const handleSendMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!chatInput.trim() || !sessionInfo) return;
+    if (!chatInput.trim() || (!sessionInfo && !activeConversationId)) return;
 
     const query = chatInput.trim();
     const userMessage: Message = { role: "user", content: query };
@@ -71,10 +262,17 @@ export default function Home() {
     }));
 
     try {
+      if (!sessionInfo && !activeConversationId) {
+        setError("Please select or upload a document first to start a new chat.");
+        setIsSending(false);
+        return;
+      }
+
       const response = await sendChatMessage(
-        sessionInfo.session_id,
+        sessionInfo?.document_id || "past-session",
         query,
-        priorHistory
+        priorHistory,
+        activeConversationId || undefined
       );
       const assistantMessage: Message = {
         role: "assistant",
@@ -83,12 +281,27 @@ export default function Home() {
         routed: response.routed,
       };
       setMessages((prev) => [...prev, assistantMessage]);
+
+      if (response.conversation_id && !activeConversationId) {
+        setActiveConversationId(response.conversation_id);
+        fetchConversations();
+      }
     } catch (err) {
-      const errorMessage: Message = {
-        role: "assistant",
-        content: `Error: ${(err as Error).message}`,
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      const msg = (err as Error).message;
+      if (
+        msg.includes("Invalid authentication") ||
+        msg.includes("Token has expired") ||
+        msg.includes("Unauthorized") ||
+        msg.includes("401")
+      ) {
+        redirectToLogin();
+      } else {
+        const errorMessage: Message = {
+          role: "assistant",
+          content: `Error: ${msg}`,
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+      }
     } finally {
       setIsSending(false);
     }
@@ -96,6 +309,7 @@ export default function Home() {
 
   const handleStartOver = () => {
     setSessionInfo(null);
+    setActiveConversationId(null); // Clear the active conversation to return to the selection screen
     setUploadedFile(null);
     setMessages([]);
     setChatInput("");
@@ -103,6 +317,13 @@ export default function Home() {
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
+    // Refresh documents so the user sees the latest when returning to the list
+    fetchDocuments();
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push("/login");
   };
 
   const scrollToUserMessage = (messageIndex: number) => {
@@ -110,42 +331,49 @@ export default function Home() {
     el?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  // Auto-scroll to latest user message when messages update or while sending
   useEffect(() => {
-    let lastUserIndex = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "user") {
-        lastUserIndex = i;
-        break;
-      }
-    }
-    if (lastUserIndex === -1) return;
-
-    const el = userMessageRefs.current.get(lastUserIndex);
-    if (el) {
+    if (chatContainerRef.current) {
       requestAnimationFrame(() => {
-        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        chatContainerRef.current!.scrollTo({
+          top: chatContainerRef.current!.scrollHeight,
+          behavior: "smooth",
+        });
       });
     }
   }, [messages, isSending]);
 
-  if (!sessionInfo) {
+  if (authLoading) {
+    return <div className="flex h-screen items-center justify-center bg-linen text-cafenoir">Loading...</div>;
+  }
+
+  // If session expired and user is not authenticated, show a clear message
+  if (!user) {
     return (
-      <UploadScreen
-        fileInputRef={fileInputRef}
-        handleFileChange={handleFileChange}
-        onFileSelected={(file) => {
-          setUploadedFile(file);
-          handleUpload(file);
-        }}
-        isUploading={isUploading}
-        error={error}
-      />
+      <div className="flex h-screen flex-col items-center justify-center bg-linen text-cafenoir gap-4">
+        <p className="text-lg">Your session has expired.</p>
+        <button
+          onClick={() => router.push("/login")}
+          className="px-6 py-2 bg-clockwork text-white rounded-lg hover:bg-clockwork-hover transition-colors"
+        >
+          Log in again
+        </button>
+      </div>
     );
   }
 
   return (
     <div className="flex h-screen overflow-hidden bg-linen">
+      {showExpiredBanner && (
+        <div className="fixed top-0 left-0 right-0 z-50 bg-mauve/10 border-b border-mauve/20 text-mauve px-4 py-3 text-center text-sm flex items-center justify-center gap-3">
+          <span>Your session has expired. Please log in again.</span>
+          <button
+            onClick={() => setShowExpiredBanner(false)}
+            className="underline hover:no-underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <Sidebar
         isOpen={sidebarOpen}
         onToggle={() => setSidebarOpen((prev) => !prev)}
@@ -154,42 +382,93 @@ export default function Home() {
         messages={messages}
         onStartOver={handleStartOver}
         onNavigateToMessage={scrollToUserMessage}
+        conversations={conversations}
+        activeConversationId={activeConversationId}
+        onSelectConversation={handleSelectConversation}
+        documents={documents}
+        onSelectDocument={handleSelectDocument}
+        onDeleteDocument={handleDeleteDocument}
       />
 
-      <div className="flex flex-col flex-1 min-w-0 h-full">
-        {/* Header */}
-        <header className="shrink-0 flex items-center gap-3 px-4 sm:px-6 py-3 border-b border-cedar/15 bg-linen/80 backdrop-blur-sm">
-          <button
-            type="button"
-            onClick={() => setSidebarOpen((prev) => !prev)}
-            className="p-2 rounded-lg text-cafenoir hover:bg-latte/40
-              transition-colors duration-200 ease-in-out"
-            aria-label={sidebarOpen ? "Close sidebar" : "Open sidebar"}
-          >
-            {sidebarOpen ? <PanelIcon /> : <MenuIcon />}
-          </button>
-          <div className="min-w-0 flex-1">
-            <h1 className="font-serif text-lg font-semibold text-cafenoir truncate">
-              HR Policy Assistant
-            </h1>
-            <p className="text-xs text-cedar truncate hidden sm:block">
-              {sessionInfo.filename}
-            </p>
+      <div className="flex flex-col flex-1 min-w-0 h-full relative">
+        {(!sessionInfo && !activeConversationId && messages.length === 0) ? (
+          <>
+            <div className="absolute top-4 left-4 z-50 md:hidden">
+              <button
+                onClick={() => setSidebarOpen((prev) => !prev)}
+                className="p-2 rounded-lg text-cafenoir bg-white/80 backdrop-blur shadow-warm-sm border border-latte hover:bg-latte/40 transition-colors"
+              >
+                <MenuIcon />
+              </button>
+            </div>
+            <UploadScreen
+              fileInputRef={fileInputRef}
+              handleFileChange={handleFileChange}
+              onFileSelected={(file) => {
+                setUploadedFile(file);
+                handleUpload(file);
+              }}
+              isUploading={isUploading}
+              error={error}
+              documents={documents}
+              onSelectDocument={handleSelectDocument}
+              isLoadingDocuments={isLoadingDocuments}
+            />
+          </>
+        ) : (
+          <>
+        <header className="shrink-0 flex items-center justify-between px-4 sm:px-6 py-3 border-b border-latte bg-white/80 backdrop-blur-sm shadow-warm-sm z-10 relative">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen((prev) => !prev)}
+              className="p-2 rounded-lg text-cedar hover:bg-latte/40
+                transition-colors duration-200 ease-in-out"
+              aria-label={sidebarOpen ? "Close sidebar" : "Open sidebar"}
+            >
+              {sidebarOpen ? <PanelIcon /> : <MenuIcon />}
+            </button>
+            <div className="min-w-0">
+              <h1 className="font-semibold text-cafenoir truncate text-lg">
+                Aegis Policy AI
+              </h1>
+              {sessionInfo?.filename && (
+                <p className="text-sm font-medium text-clockwork truncate flex items-center gap-1 mt-0.5" title={sessionInfo.filename}>
+                  📄 {sessionInfo.filename}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            {user && (
+              <div className="hidden sm:flex items-center gap-2 text-sm font-medium text-cafenoir bg-linen px-3 py-1.5 rounded-full border border-latte">
+                <UserIcon className="w-4 h-4 text-clockwork" />
+                <span className="truncate max-w-[150px]">{user.email}</span>
+              </div>
+            )}
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 p-2 sm:px-3 sm:py-1.5 text-sm font-medium text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors border border-transparent hover:border-red-100"
+              title="Sign Out"
+            >
+              <LogOut className="w-4 h-4" />
+              <span className="hidden sm:inline">Sign Out</span>
+            </button>
           </div>
         </header>
 
-        {/* Chat messages */}
         <div
           ref={chatContainerRef}
           className="flex-1 overflow-y-auto custom-scrollbar"
         >
           {messages.length === 0 && !isSending && (
             <div className="flex flex-col items-center justify-center h-full px-6 text-center">
-              <p className="font-serif text-xl text-cafenoir mb-2">
+              <p className="font-bold text-2xl tracking-tight text-cafenoir mb-2">
                 Ready to help
               </p>
               <p className="text-sm text-cedar max-w-md leading-relaxed">
-                Ask anything about your uploaded policy document. Answers are
+                Ask anything about your policy document. Answers are
                 grounded in the source material with cited references.
               </p>
             </div>
@@ -202,9 +481,9 @@ export default function Home() {
               ref={
                 msg.role === "user"
                   ? (el) => {
-                      if (el) userMessageRefs.current.set(index, el);
-                      else userMessageRefs.current.delete(index);
-                    }
+                    if (el) userMessageRefs.current.set(index, el);
+                    else userMessageRefs.current.delete(index);
+                  }
                   : undefined
               }
             />
@@ -213,13 +492,14 @@ export default function Home() {
           {isSending && <TypingIndicator />}
         </div>
 
-        {/* Sticky input */}
         <ChatInput
           chatInput={chatInput}
           setChatInput={setChatInput}
           isSending={isSending}
           onSubmit={handleSendMessage}
         />
+          </>
+        )}
       </div>
     </div>
   );

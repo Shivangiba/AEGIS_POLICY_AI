@@ -10,18 +10,20 @@ from pydantic import BaseModel, Field
 
 
 class ChatRequest(BaseModel):
-    """Request model for the /chat endpoint."""
+    """Request model for the /chat/message endpoint."""
 
-    session_id: str
+    document_ids: List[str]
     query: str
     chat_history: list[dict] = Field(default_factory=list)
+    conversation_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
-    """Response model for the /chat endpoint."""
+    """Response model for the /chat/message endpoint."""
     answer: str
     source_chunks: List[str]
     routed: bool
+    conversation_id: Optional[str] = None
 
 
 class SensitiveTopicRequest(BaseModel):
@@ -33,4 +35,24 @@ class SensitiveTopicResponse(BaseModel):
     """Response model for the check_sensitive_topic endpoint."""
     is_sensitive: bool
     message: Optional[str] = None
+
+class ConversationHistoryItem(BaseModel):
+    question: str
+    answer: str
+    timestamp: str
+
+class ConversationResponse(BaseModel):
+    id: str
+    title: str
+    document_id: Optional[str] = None
+
+class ConversationListResponse(BaseModel):
+    conversations: List[ConversationResponse]
+
+class ConversationDetailResponse(BaseModel):
+    id: str
+    title: str
+    document_id: Optional[str] = None
+    conversation_history: List[ConversationHistoryItem]
+
 

@@ -1,9 +1,12 @@
 import os
 import tempfile
 import uuid
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.core.config import settings
+from app.core.security import get_current_user
+from app.core.database import db
 from app.services.document_processor import NoTextFoundError, process_pdf
 from app.services.vector_store import vector_store_manager
 from app.services.safety_router import check_sensitive_topic
@@ -11,18 +14,11 @@ from app.models.schemas import SensitiveTopicRequest, SensitiveTopicResponse
 
 router = APIRouter()
 
-
 @router.post("/check-sensitive-topic", response_model=SensitiveTopicResponse)
-async def check_sensitive_topic_endpoint(request: SensitiveTopicRequest):
-    """
-    Checks if the provided query contains sensitive topics.
-
-    Args:
-        request (SensitiveTopicRequest): The request containing the query.
-
-    Returns:
-        SensitiveTopicResponse: True with a canned message if sensitive, False otherwise.
-    """
+async def check_sensitive_topic_endpoint(
+    request: SensitiveTopicRequest,
+    _user_id: str = Depends(get_current_user),
+):
     try:
         result = check_sensitive_topic(request.query)
         if result is not None:
@@ -31,48 +27,38 @@ async def check_sensitive_topic_endpoint(request: SensitiveTopicRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal error checking safety: {e}")
 
-
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    """
-    Accepts a PDF file, processes it, and creates a new RAG session.
-
-    - Validates that the uploaded file is a PDF.
-    - Saves the file temporarily to disk.
-    - Processes the PDF to extract text and split it into chunks.
-    - Creates a new vector store session and indexes the document chunks.
-    - Cleans up the temporary file after processing.
-
-    Args:
-        file (UploadFile): The PDF file uploaded by the user.
-
-    Returns:
-        JSONResponse: A confirmation message with the new session ID,
-                      filename, and number of indexed chunks.
-    
-    Raises:
-        HTTPException: 
-            - 400 if the file is not a PDF.
-            - 422 if the PDF processing fails (e.g., no text found).
-            - 500 for other server-side errors.
-    """
+async def upload_file(
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user),
+):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=400, detail="Invalid file type. Only PDFs are allowed."
         )
 
-    session_id = str(uuid.uuid4())
+    document_id = str(uuid.uuid4())
     temp_file_path = None
     session_created = False
 
     try:
-        # Create a temporary file to store the upload
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
             temp_file_path = temp_file.name
-            content = await file.read()
+            MAX_BYTES = 25 * 1024 * 1024
+            content = await file.read(MAX_BYTES + 1)
+            if len(content) > MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail="File is too large. Maximum allowed size is 25 MB."
+                )
             temp_file.write(content)
 
-        # Process the PDF to get document chunks
+        # Upload to GridFS
+        grid_in = db.fs.open_upload_stream(file.filename)
+        await grid_in.write(content)
+        await grid_in.close()
+        gridfs_id = grid_in._id
+
         try:
             chunks = process_pdf(
                 file_path=temp_file_path,
@@ -84,26 +70,34 @@ async def upload_file(file: UploadFile = File(...)):
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"Failed to process PDF: {e}")
 
-        # Create a new session in the vector store
-        vector_store_manager.create_session(session_id, chunks)
+        # Add to vector store
+        vector_store_manager.index_document(user_id, document_id, chunks)
         session_created = True
 
+        # Save metadata to MongoDB
+        await db.db.documents.insert_one({
+            "_id": document_id,
+            "user_id": user_id,
+            "filename": file.filename,
+            "gridfs_id": gridfs_id,
+            "chunk_count": len(chunks),
+            "upload_timestamp": datetime.now(timezone.utc).isoformat(),
+            "processing_status": "indexed"
+        })
+
     except HTTPException:
-        # Known, expected errors — re-raise as-is, no session to clean up
         raise
     except Exception as e:
-        # Unexpected error — only clean up if a session was actually created
         if session_created:
-            vector_store_manager.delete_session(session_id)
+            vector_store_manager.delete_document(user_id, document_id)
         raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
     finally:
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
     return {
-        "session_id": session_id,
+        "document_id": document_id,
         "filename": file.filename,
         "chunk_count": len(chunks),
         "status": "indexed",
     }
-

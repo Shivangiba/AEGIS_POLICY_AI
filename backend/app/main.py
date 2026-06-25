@@ -4,16 +4,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.routes import upload, chat
+from app.routes import upload, chat, documents
 from app.services.vector_store import VectorStoreManager
+from app.core.database import connect_to_mongo, close_mongo_connection
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[Startup] Pre-loading embedding model\u2026")
+    print("[Startup] Pre-loading embedding model…")
     VectorStoreManager.get_embedding_function()
     print("[Startup] Embedding model ready.")
+    await connect_to_mongo()
+    print("[Startup] Connected to MongoDB.")
     yield
+    await close_mongo_connection()
+    print("[Shutdown] Disconnected from MongoDB.")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -39,6 +44,7 @@ app.add_middleware(
 
 app.include_router(upload.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+app.include_router(documents.router, prefix="/api")
 
 
 @app.get("/health")

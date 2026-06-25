@@ -44,8 +44,8 @@ Follow these rules strictly:
 3.  **Do not infer, guess, or make up policies.** If the context mentions "vacation days" but not "sick leave," and the user asks about sick leave, the answer is not in the document.
 4.  **Stay factually objective.** Quote or paraphrase the policy text directly when possible. Do not add opinions, suggestions, or interpretations.
 5.  **Your response should be concise and directly address the user's question.**
-If the answer requires combining or directly reading information explicitly present across multiple retrieved context segments (such as a company name appearing in a document header or title), you MUST use that information rather than declining to answer — only decline if the information is genuinely absent from all provided context segments. Read the context segments carefully and completely before deciding whether the answer is present.
-""",
+6.  **Handle Topics/Keywords:** If the user's input is a topic, phrase, or keyword rather than a full question (e.g., "Expense Reimbursement", "Travel Policy", or just a number/title like "5. Expense Reimbursement"), provide a comprehensive summary or explanation of what the provided context says about that topic.
+If the answer requires combining or directly reading information explicitly present across multiple retrieved context segments (such as a company name appearing in a document header or title), you MUST use that information rather than declining to answer — only decline if the information is genuinely absent from all provided context segments. Read the context segments carefully and completely before deciding whether the answer is present.""",
         ),
         ("human", "Context:\n{context}\n\nUser Question:\n{input}"),
     ]

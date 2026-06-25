@@ -7,6 +7,13 @@ class Settings(BaseSettings):
     CHUNK_SIZE: int = 800
     CHUNK_OVERLAP: int = 200
     
+    # Database
+    MONGODB_URI: str = "mongodb://localhost:27017"
+
+    # Supabase Auth
+    SUPABASE_URL: str
+    SUPABASE_JWT_SECRET: str
+    
     # 1. Map the .env variable "ALLOWED_ORIGINS" to this field
     ALLOWED_ORIGINS: Union[str, List[str]]
 

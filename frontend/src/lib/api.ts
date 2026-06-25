@@ -1,5 +1,6 @@
 import axios, { AxiosError } from "axios";
-import type { UploadResponse, ChatResponse, Message } from "./types";
+import type { UploadResponse, ChatResponse, Message, ConversationListResponse, ConversationDetailResponse, DocumentResponse } from "./types";
+import { supabase } from "./supabase";
 
 /**
  * In the browser we use same-origin relative URLs (proxied by next.config rewrites).
@@ -12,51 +13,67 @@ const apiClient = axios.create({
       : process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000",
 });
 
+apiClient.interceptors.request.use(async (config) => {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session?.access_token) {
+    config.headers.Authorization = `Bearer ${session.access_token}`;
+  }
+  return config;
+});
+
 function formatApiError(error: unknown, fallback: string): Error {
   if (axios.isAxiosError(error)) {
     const axiosError = error as AxiosError<{ detail?: string | { msg: string }[] }>;
 
-    console.error("[API Error]", {
-      message: axiosError.message,
-      code: axiosError.code,
-      status: axiosError.response?.status,
-      statusText: axiosError.response?.statusText,
-      data: axiosError.response?.data,
-      url: axiosError.config?.url,
-      baseURL: axiosError.config?.baseURL,
-      method: axiosError.config?.method,
-    });
-
-    if (axiosError.response) {
-      const { detail } = axiosError.response.data ?? {};
-      if (typeof detail === "string") {
-        return new Error(detail);
+    if (!axiosError.response) {
+      if (axiosError.code === "ERR_NETWORK" || axiosError.code === "ECONNREFUSED") {
+        return new Error("Network error: Cannot connect to backend");
       }
-      if (Array.isArray(detail)) {
-        return new Error(detail.map((d) => d.msg).join(", "));
-      }
-      return new Error(
-        `Request failed (${axiosError.response.status} ${axiosError.response.statusText})`
-      );
+      return new Error(axiosError.message || fallback);
     }
 
-    if (axiosError.code === "ERR_NETWORK") {
-      return new Error(
-        `Network error: ${axiosError.message}. ` +
-          "If the backend logged 200 OK but the UI failed, this is usually a CORS/origin block — " +
-          "open DevTools → Network, select the upload request, and check for a CORS error on the response."
-      );
+    const status = axiosError.response.status;
+    const data = axiosError.response.data;
+    
+    if (status === 401) {
+      return new Error("Session expired. Please log in again.");
+    }
+    
+    if (status === 403) {
+      return new Error("You don't have permission to access this resource.");
+    }
+    
+    if (status === 413) {
+      return new Error("File is too large.");
+    }
+    
+    if (status === 500) {
+      return new Error("Server error. Please try again later.");
+    }
+    
+    if (status === 503) {
+      return new Error("Service unavailable. Backend is down.");
     }
 
-    return new Error(axiosError.message || fallback);
+    if (!data || !data.detail) {
+      return new Error(`Error ${status}: ${axiosError.response.statusText}`);
+    }
+
+    const { detail } = data;
+    if (typeof detail === "string") {
+      return new Error(detail);
+    }
+    if (Array.isArray(detail)) {
+      return new Error(detail.map((d) => d.msg).join(", "));
+    }
+    
+    return new Error(`Error ${status}: ${axiosError.response.statusText}`);
   }
 
   if (error instanceof Error) {
-    console.error("[API Error]", error);
     return error;
   }
 
-  console.error("[API Error]", error);
   return new Error(fallback);
 }
 
@@ -102,19 +119,65 @@ export async function uploadDocument(file: File): Promise<UploadResponse> {
  * @returns A promise that resolves to the chat response.
  */
 export async function sendChatMessage(
-  sessionId: string,
+  documentId: string,
   query: string,
-  chatHistory: { role: "user" | "assistant"; content: string }[] = []
+  chatHistory: { role: "user" | "assistant"; content: string }[] = [],
+  conversationId?: string
 ): Promise<ChatResponse> {
   try {
-    const response = await apiClient.post<ChatResponse>("/api/chat", {
-      session_id: sessionId,
+    const response = await apiClient.post<ChatResponse>("/api/chat/message", {
+      document_ids: [documentId],
       query: query,
       chat_history: chatHistory,
+      conversation_id: conversationId,
     });
     return response.data;
   } catch (error) {
     throw formatApiError(error, "An unknown error occurred while sending the message.");
+  }
+}
+
+export async function getConversations(): Promise<ConversationListResponse> {
+  try {
+    const response = await apiClient.get<ConversationListResponse>("/api/chat/conversations");
+    return response.data;
+  } catch (error) {
+    throw formatApiError(error, "Failed to fetch conversations.");
+  }
+}
+
+export async function getConversationDetail(id: string): Promise<ConversationDetailResponse> {
+  try {
+    const response = await apiClient.get<ConversationDetailResponse>(`/api/chat/conversations/${id}`);
+    return response.data;
+  } catch (error) {
+    throw formatApiError(error, "Failed to fetch conversation details.");
+  }
+}
+
+export async function getDocuments(): Promise<DocumentResponse[]> {
+  try {
+    const response = await apiClient.get<DocumentResponse[]>("/api/documents");
+    return response.data;
+  } catch (error) {
+    throw formatApiError(error, "Failed to fetch documents.");
+  }
+}
+
+export async function getDocumentDetail(id: string): Promise<DocumentResponse> {
+  try {
+    const response = await apiClient.get<DocumentResponse>(`/api/documents/${id}`);
+    return response.data;
+  } catch (error) {
+    throw formatApiError(error, "Failed to fetch document details.");
+  }
+}
+
+export async function deleteDocument(id: string): Promise<void> {
+  try {
+    await apiClient.delete(`/api/documents/${id}`);
+  } catch (error) {
+    throw formatApiError(error, "Failed to delete document.");
   }
 }
 

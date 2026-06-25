@@ -2,20 +2,20 @@
 
 /* Tailwind v4: register palette as @theme tokens (direct hex values) */
 @theme {
-  --color-linen: #fff9f3;
-  --color-latte: #dbc4a5;
-  --color-latte-muted: rgb(219 196 165 / 0.35);
-  --color-deepolive: #44422d;
-  --color-clockwork: #72583e;
-  --color-clockwork-hover: #5f4a34;
-  --color-cedar: #7c7960;
-  --color-mauve: #755151;
-  --color-mauve-muted: rgb(117 81 81 / 0.12);
-  --color-cafenoir: #443223;
-  --color-weathered: #a08670;
+  --color-linen: #f8fafc;
+  --color-latte: #e2e8f0;
+  --color-latte-muted: rgb(226 232 240 / 0.5);
+  --color-deepolive: #334155;
+  --color-clockwork: #4f46e5;
+  --color-clockwork-hover: #4338ca;
+  --color-cedar: #64748b;
+  --color-mauve: #ef4444;
+  --color-mauve-muted: rgb(254 226 226 / 0.5);
+  --color-cafenoir: #0f172a;
+  --color-weathered: #94a3b8;
 
-  --color-background: #fff9f3;
-  --color-foreground: #44422d;
+  --color-background: #f8fafc;
+  --color-foreground: #334155;
 
   --font-sans: var(--font-inter);
   --font-serif: var(--font-lora);

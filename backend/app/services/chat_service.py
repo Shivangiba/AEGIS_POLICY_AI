@@ -18,7 +18,7 @@ from app.core.prompts import (
     REFORMULATE_QUERY_PROMPT,
 )
 from app.services.safety_router import check_sensitive_topic
-from app.services.vector_store import SessionNotFoundError, vector_store_manager
+from app.services.vector_store import vector_store_manager
 
 
 def format_docs(docs: List[Document]) -> str:
@@ -118,7 +118,7 @@ def reformulate_query(chat_history: list[dict], current_query: str) -> str:
 
 
 def generate_answer(
-    session_id: str, query: str, chat_history: Optional[List[Dict[str, str]]] = None
+    user_id: str, document_ids: List[str], query: str, chat_history: Optional[List[Dict[str, str]]] = None
 ) -> Dict[str, Any]:
     """
     Generates a grounded answer for a user query based on a session's context.
@@ -132,7 +132,8 @@ def generate_answer(
     6. Returns the answer along with truncated source previews.
 
     Args:
-        session_id: The unique identifier for the user session.
+        user_id: The unique identifier for the user.
+        document_ids: The unique identifiers for the document sessions.
         query: The user's original question.
         chat_history: The history of the conversation. Defaults to None.
 
@@ -140,7 +141,7 @@ def generate_answer(
         A dictionary containing the answer, source chunks, and routing status.
 
     Raises:
-        ValueError: If the session_id is invalid or has expired.
+        ValueError: If the document_id is invalid or has expired.
     """
     if chat_history is None:
         chat_history = []
@@ -172,9 +173,9 @@ def generate_answer(
 
     # Step 4: Retrieve relevant chunks using the reformulated query
     try:
-        retriever = vector_store_manager.get_retriever(session_id, k=5)
-    except SessionNotFoundError as exc:
-        raise ValueError("Session expired or invalid, please re-upload.") from exc
+        retriever = vector_store_manager.get_retriever(user_id, document_ids, k=5)
+    except Exception as exc:
+        raise ValueError("Error retrieving from vector store.") from exc
 
     retrieved_docs = retriever.invoke(reformulated_query)
     context_str = format_docs(retrieved_docs)
